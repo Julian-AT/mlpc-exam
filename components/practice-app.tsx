@@ -636,7 +636,7 @@ export function PracticeApp() {
         onOpenMenu={() => setScreen("menu")}
       />
 
-      <section className="mx-auto w-full max-w-[590px] px-4 pt-4 pb-24 sm:px-0">
+      <section className="mx-auto w-full max-w-[590px] px-4 pt-4 pb-[calc(7rem+env(safe-area-inset-bottom))] sm:px-0">
         <div className="mb-5 h-[3px] rounded-full bg-muted">
           <div
             className="h-full rounded-full bg-foreground transition-all"
@@ -1403,10 +1403,10 @@ function BottomBar({
   onClick: () => void
 }) {
   return (
-    <div className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-background/92 p-2 backdrop-blur sm:p-3">
+    <div className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-background/92 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur sm:px-3 sm:pt-3 sm:pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
       <div className="mx-auto w-full max-w-[590px]">
         <button
-          className="h-[50px] w-full rounded-[10px] bg-foreground text-base font-bold text-background shadow-sm transition enabled:hover:bg-foreground/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+          className="h-12 w-full rounded-[10px] bg-foreground text-base font-bold text-background shadow-sm transition enabled:hover:bg-foreground/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground sm:h-[50px]"
           disabled={disabled}
           onClick={onClick}
           type="button"
