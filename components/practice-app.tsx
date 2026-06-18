@@ -1308,8 +1308,12 @@ function ChoiceButton({
         ? "border-destructive/60 bg-destructive/10"
         : "border-border bg-card"
     : isSelected
-      ? "border-foreground bg-card ring-2 ring-foreground"
+      ? "border-ring/70 bg-muted/60 ring-1 ring-ring/25"
       : "border-border bg-card hover:border-muted-foreground/50 hover:bg-muted/50"
+  const badgeClass =
+    !showFeedback && isSelected
+      ? "border-ring/30 bg-background text-foreground"
+      : "border-border bg-muted text-muted-foreground"
 
   return (
     <button
@@ -1320,7 +1324,12 @@ function ChoiceButton({
       onClick={onClick}
       type="button"
     >
-      <span className="flex size-[30px] items-center justify-center rounded-md border border-border bg-muted text-xs font-bold text-muted-foreground lowercase">
+      <span
+        className={cn(
+          "flex size-[30px] items-center justify-center rounded-md border text-xs font-bold lowercase",
+          badgeClass
+        )}
+      >
         {String.fromCharCode(97 + index)}
       </span>
       <MathText
@@ -1365,7 +1374,7 @@ function SourceDialog({ source }: { source: Source }) {
     <Dialog>
       <DialogTrigger asChild>
         <button
-          className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground"
+          className="inline-flex size-8 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-ring/50 hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/25"
           type="button"
         >
           <AppIcon icon={Image02Icon} />
@@ -1443,9 +1452,9 @@ function IconButton({
   return (
     <button
       className={cn(
-        "inline-flex size-8 items-center justify-center rounded-lg border",
+        "inline-flex size-8 items-center justify-center rounded-lg border transition hover:border-ring/50 hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/25",
         active
-          ? "border-foreground bg-foreground text-background"
+          ? "border-ring/45 bg-muted text-foreground"
           : "border-border bg-card text-muted-foreground"
       )}
       onClick={onClick}
