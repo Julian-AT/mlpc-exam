@@ -26,7 +26,11 @@ export type CognitiveLevel =
   | "application"
   | "comparison"
 
-export type SourceKind = "lecture_slides" | "past_exam" | "exam_image" | "generated"
+export type SourceKind =
+  | "lecture_slides"
+  | "past_exam"
+  | "exam_image"
+  | "generated"
 
 export type SourceRef = {
   sourceId: string
@@ -47,6 +51,9 @@ export type Question = {
   topicIds: string[]
   lectureIds: string[]
   difficulty: Difficulty
+  examStyleConfidence?: number
+  commonTrap?: string
+  coreClosedBookLikely?: boolean
   cognitiveLevel: CognitiveLevel
   interactionType: InteractionType
   stem: string

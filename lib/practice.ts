@@ -1,8 +1,14 @@
 import { questionBank } from "@/lib/data"
 
-import type { Choice, Question, QuestionOrigin, Source, Topic } from "@/lib/data"
+import type {
+  Choice,
+  Question,
+  QuestionOrigin,
+  Source,
+  Topic,
+} from "@/lib/data"
 
-export type PracticeMode = "exam" | "practice" | "review"
+export type PracticeMode = "exam" | "practice" | "review" | "mock" | "drill"
 
 export type PracticeSourceFilter =
   | "all"
@@ -24,6 +30,26 @@ export type AnswerRecord = {
   answeredAt: string
 }
 
+export type MockExamSession = {
+  version: 1
+  status: "active" | "submitted"
+  questionIds: string[]
+  answers: Record<string, string[]>
+  startedAt: string
+  submittedAt: string | null
+  durationMinutes: number
+}
+
+export type DrillSession = {
+  version: 1
+  status: "active" | "completed"
+  questionIds: string[]
+  correctStreaks: Record<string, number>
+  completedIds: string[]
+  startedAt: string
+  completedAt: string | null
+}
+
 export type PracticeProgress = {
   version: 1
   mode: PracticeMode
@@ -33,6 +59,8 @@ export type PracticeProgress = {
   currentByMode: Record<PracticeMode, string | null>
   answers: Record<string, AnswerRecord>
   bookmarks: string[]
+  mockExam: MockExamSession | null
+  drill: DrillSession | null
   lastUpdatedAt: string | null
 }
 
@@ -46,6 +74,17 @@ export type PracticeStats = {
   coverage: number
   accuracy: number
   averageAttempts: number
+}
+
+export type MockExamStats = Pick<
+  PracticeStats,
+  "total" | "answered" | "correct" | "missed" | "unanswered" | "accuracy"
+>
+
+export type MockReviewItem = {
+  question: Question
+  selectedChoiceIds: string[]
+  isCorrect: boolean
 }
 
 export type TopicPracticeStats = PracticeStats & {
@@ -114,9 +153,13 @@ export function createDefaultProgress(): PracticeProgress {
       exam: EXAM_QUESTIONS[0]?.id ?? null,
       practice: PRACTICE_QUESTIONS[0]?.id ?? null,
       review: null,
+      mock: null,
+      drill: null,
     },
     answers: {},
     bookmarks: [],
+    mockExam: null,
+    drill: null,
     lastUpdatedAt: null,
   }
 }
@@ -144,6 +187,8 @@ export function normalizeProgress(value: unknown): PracticeProgress {
     currentByMode: normalizeCurrentByMode(value.currentByMode),
     answers: normalizeAnswers(value.answers),
     bookmarks: normalizeBookmarks(value.bookmarks),
+    mockExam: normalizeMockExamSession(value.mockExam),
+    drill: normalizeDrillSession(value.drill),
     lastUpdatedAt:
       typeof value.lastUpdatedAt === "string" ? value.lastUpdatedAt : null,
   }
@@ -153,12 +198,22 @@ export function getPracticeQuestions(
   filters: PracticeFilters,
   progress: PracticeProgress
 ) {
+  if (filters.mode === "mock" && progress.mockExam?.questionIds.length) {
+    return questionsFromIds(progress.mockExam.questionIds, EXAM_QUESTIONS)
+  }
+
+  if (filters.mode === "drill" && progress.drill?.questionIds.length) {
+    return questionsFromIds(progress.drill.questionIds, PRACTICE_QUESTIONS)
+  }
+
   const sourceQuestions =
-    filters.mode === "exam" ? EXAM_QUESTIONS : PRACTICE_QUESTIONS
+    filters.mode === "exam" || filters.mode === "mock"
+      ? EXAM_QUESTIONS
+      : PRACTICE_QUESTIONS
   const filtered = sourceQuestions
     .filter((question) => matchesTopic(question, filters.topicId))
     .filter((question) =>
-      filters.mode === "exam"
+      filters.mode === "exam" || filters.mode === "mock"
         ? true
         : matchesSourceFilter(question, filters.sourceFilter)
     )
@@ -210,6 +265,194 @@ export function getDisplayChoices(
       stableChoiceHash(question.id, left.id) -
       stableChoiceHash(question.id, right.id)
   )
+}
+
+export function createMockExamSession(
+  questionIds: string[],
+  startedAt: string,
+  durationMinutes = 45
+): MockExamSession {
+  return {
+    version: 1,
+    status: "active",
+    questionIds: questionIds.filter((questionId) =>
+      validQuestionIds.has(questionId)
+    ),
+    answers: {},
+    startedAt,
+    submittedAt: null,
+    durationMinutes,
+  }
+}
+
+export function getMockExamStats(
+  questions: Question[],
+  session: MockExamSession | null
+): MockExamStats {
+  if (!session) {
+    return {
+      total: questions.length,
+      answered: 0,
+      correct: 0,
+      missed: 0,
+      unanswered: questions.length,
+      accuracy: 0,
+    }
+  }
+
+  const answeredQuestions = questions.filter(
+    (question) => (session.answers[question.id] ?? []).length > 0
+  )
+  const correct = answeredQuestions.filter((question) =>
+    evaluateChoiceAnswer(question, session.answers[question.id] ?? [])
+  ).length
+
+  return {
+    total: questions.length,
+    answered: answeredQuestions.length,
+    correct,
+    missed: answeredQuestions.length - correct,
+    unanswered: questions.length - answeredQuestions.length,
+    accuracy: percent(correct, questions.length),
+  }
+}
+
+export function getMockReviewItems(
+  questions: Question[],
+  session: MockExamSession | null,
+  includeCorrect = false
+): MockReviewItem[] {
+  if (!session) {
+    return []
+  }
+
+  return questions
+    .map((question) => {
+      const selectedChoiceIds = session.answers[question.id] ?? []
+      const isCorrect =
+        selectedChoiceIds.length > 0 &&
+        evaluateChoiceAnswer(question, selectedChoiceIds)
+
+      return {
+        question,
+        selectedChoiceIds,
+        isCorrect,
+      }
+    })
+    .filter(
+      (item) =>
+        includeCorrect || !item.isCorrect || item.selectedChoiceIds.length === 0
+    )
+}
+
+export function getMockRemainingSeconds(
+  session: MockExamSession | null,
+  nowMs: number
+) {
+  if (!session || session.status !== "active") {
+    return 0
+  }
+
+  const startedAtMs = Date.parse(session.startedAt)
+  const durationMs = session.durationMinutes * 60 * 1000
+
+  if (Number.isNaN(startedAtMs)) {
+    return durationMs / 1000
+  }
+
+  return Math.max(0, Math.ceil((startedAtMs + durationMs - nowMs) / 1000))
+}
+
+export function createDrillSession(
+  questionIds: string[],
+  startedAt: string
+): DrillSession {
+  const uniqueQuestionIds = Array.from(
+    new Set(
+      questionIds.filter((questionId) => validQuestionIds.has(questionId))
+    )
+  )
+
+  return {
+    version: 1,
+    status: uniqueQuestionIds.length ? "active" : "completed",
+    questionIds: uniqueQuestionIds,
+    correctStreaks: {},
+    completedIds: [],
+    startedAt,
+    completedAt: uniqueQuestionIds.length ? null : startedAt,
+  }
+}
+
+export function updateDrillSession(
+  session: DrillSession,
+  questionId: string,
+  isCorrect: boolean,
+  completedAt = new Date().toISOString()
+): DrillSession {
+  const nextStreak = isCorrect
+    ? (session.correctStreaks[questionId] ?? 0) + 1
+    : 0
+  const completedIds = new Set(session.completedIds)
+
+  if (nextStreak >= 2) {
+    completedIds.add(questionId)
+  } else {
+    completedIds.delete(questionId)
+  }
+
+  const remainingIds = session.questionIds.filter((id) => !completedIds.has(id))
+
+  return {
+    ...session,
+    status: remainingIds.length ? "active" : "completed",
+    correctStreaks: {
+      ...session.correctStreaks,
+      [questionId]: nextStreak,
+    },
+    completedIds: Array.from(completedIds).filter((id) =>
+      session.questionIds.includes(id)
+    ),
+    completedAt: remainingIds.length ? null : completedAt,
+  }
+}
+
+export function getDrillRemainingQuestionIds(session: DrillSession | null) {
+  if (!session) {
+    return []
+  }
+
+  const completedIds = new Set(session.completedIds)
+  return session.questionIds.filter(
+    (questionId) => !completedIds.has(questionId)
+  )
+}
+
+export function getNextDrillQuestionId(
+  questions: Question[],
+  session: DrillSession | null,
+  currentQuestionId: string | null
+) {
+  const remainingIds = getDrillRemainingQuestionIds(session)
+
+  if (!remainingIds.length) {
+    return null
+  }
+
+  const currentIndex = Math.max(
+    0,
+    questions.findIndex((question) => question.id === currentQuestionId)
+  )
+
+  for (let offset = 1; offset <= questions.length; offset += 1) {
+    const candidate = questions[(currentIndex + offset) % questions.length]
+
+    if (candidate && remainingIds.includes(candidate.id)) {
+      return candidate.id
+    }
+  }
+
+  return remainingIds[0] ?? null
 }
 
 export function getPracticeStats(
@@ -413,6 +656,115 @@ function normalizeBookmarks(value: unknown) {
   )
 }
 
+function normalizeMockExamSession(value: unknown): MockExamSession | null {
+  if (!isRecord(value) || !Array.isArray(value.questionIds)) {
+    return null
+  }
+
+  const questionIds = Array.from(
+    new Set(
+      value.questionIds.filter(
+        (questionId): questionId is string =>
+          typeof questionId === "string" && validQuestionIds.has(questionId)
+      )
+    )
+  )
+
+  if (!questionIds.length) {
+    return null
+  }
+
+  const answers = isRecord(value.answers)
+    ? Object.fromEntries(
+        Object.entries(value.answers)
+          .filter(
+            ([questionId, selectedChoiceIds]) =>
+              validQuestionIds.has(questionId) &&
+              Array.isArray(selectedChoiceIds)
+          )
+          .map(([questionId, selectedChoiceIds]) => [
+            questionId,
+            (selectedChoiceIds as unknown[]).filter(
+              (choiceId): choiceId is string => typeof choiceId === "string"
+            ),
+          ])
+      )
+    : {}
+
+  return {
+    version: 1,
+    status: value.status === "submitted" ? "submitted" : "active",
+    questionIds,
+    answers,
+    startedAt:
+      typeof value.startedAt === "string"
+        ? value.startedAt
+        : new Date(0).toISOString(),
+    submittedAt:
+      typeof value.submittedAt === "string" ? value.submittedAt : null,
+    durationMinutes:
+      typeof value.durationMinutes === "number" && value.durationMinutes > 0
+        ? Math.floor(value.durationMinutes)
+        : 45,
+  }
+}
+
+function normalizeDrillSession(value: unknown): DrillSession | null {
+  if (!isRecord(value) || !Array.isArray(value.questionIds)) {
+    return null
+  }
+
+  const questionIds = Array.from(
+    new Set(
+      value.questionIds.filter(
+        (questionId): questionId is string =>
+          typeof questionId === "string" && validQuestionIds.has(questionId)
+      )
+    )
+  )
+
+  if (!questionIds.length) {
+    return null
+  }
+
+  const correctStreaks = isRecord(value.correctStreaks)
+    ? Object.fromEntries(
+        Object.entries(value.correctStreaks)
+          .filter(
+            ([questionId, streak]) =>
+              questionIds.includes(questionId) && typeof streak === "number"
+          )
+          .map(([questionId, streak]) => [
+            questionId,
+            Math.max(0, Math.floor(streak as number)),
+          ])
+      )
+    : {}
+  const completedIds = Array.isArray(value.completedIds)
+    ? value.completedIds.filter(
+        (questionId): questionId is string =>
+          typeof questionId === "string" && questionIds.includes(questionId)
+      )
+    : []
+
+  return {
+    version: 1,
+    status:
+      value.status === "completed" || completedIds.length === questionIds.length
+        ? "completed"
+        : "active",
+    questionIds,
+    correctStreaks,
+    completedIds,
+    startedAt:
+      typeof value.startedAt === "string"
+        ? value.startedAt
+        : new Date(0).toISOString(),
+    completedAt:
+      typeof value.completedAt === "string" ? value.completedAt : null,
+  }
+}
+
 function normalizeCurrentByMode(
   value: unknown
 ): Record<PracticeMode, string | null> {
@@ -426,6 +778,8 @@ function normalizeCurrentByMode(
     exam: normalizeQuestionId(value.exam) ?? fallback.exam,
     practice: normalizeQuestionId(value.practice) ?? fallback.practice,
     review: normalizeQuestionId(value.review),
+    mock: normalizeQuestionId(value.mock),
+    drill: normalizeQuestionId(value.drill),
   }
 }
 
@@ -457,6 +811,15 @@ function sortByBankOrder(a: Question, b: Question) {
   return (questionOrder.get(a.id) ?? 0) - (questionOrder.get(b.id) ?? 0)
 }
 
+function questionsFromIds(questionIds: string[], questions: Question[]) {
+  const questionsById = new Map(
+    questions.map((question) => [question.id, question])
+  )
+  return questionIds
+    .map((questionId) => questionsById.get(questionId))
+    .filter((question): question is Question => Boolean(question))
+}
+
 function stableChoiceHash(questionId: string, choiceId: string) {
   const value = `${questionId}:${choiceId}`
   let hash = 2166136261
@@ -479,7 +842,13 @@ function roundTo(value: number, digits: number) {
 }
 
 function isPracticeMode(value: unknown): value is PracticeMode {
-  return value === "exam" || value === "practice" || value === "review"
+  return (
+    value === "exam" ||
+    value === "practice" ||
+    value === "review" ||
+    value === "mock" ||
+    value === "drill"
+  )
 }
 
 function isPracticeSourceFilter(value: unknown): value is PracticeSourceFilter {

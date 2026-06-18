@@ -2,11 +2,17 @@ import { describe, expect, test } from "bun:test"
 
 import {
   EXAM_QUESTIONS,
+  createDrillSession,
   createDefaultProgress,
+  createMockExamSession,
   evaluateChoiceAnswer,
+  getDrillRemainingQuestionIds,
   getDisplayChoices,
+  getMockExamStats,
+  getMockReviewItems,
   getPracticeQuestions,
   getPracticeStats,
+  updateDrillSession,
 } from "./practice"
 
 const examFilters = {
@@ -88,6 +94,60 @@ describe("practice question flow", () => {
     ])
   })
 
+  test("mock exam scoring stays separate from practice answers", () => {
+    const [correctQuestion, missedQuestion] = EXAM_QUESTIONS
+    const session = createMockExamSession(
+      [correctQuestion.id, missedQuestion.id],
+      "2026-06-18T10:00:00.000Z",
+      45
+    )
+
+    session.answers[correctQuestion.id] = correctQuestion.correctChoiceIds ?? []
+    session.answers[missedQuestion.id] = ["wrong"]
+    session.submittedAt = "2026-06-18T10:20:00.000Z"
+    session.status = "submitted"
+
+    expect(
+      getMockExamStats([correctQuestion, missedQuestion], session)
+    ).toEqual({
+      total: 2,
+      answered: 2,
+      correct: 1,
+      missed: 1,
+      unanswered: 0,
+      accuracy: 50,
+    })
+    expect(
+      getMockReviewItems([correctQuestion, missedQuestion], session).map(
+        (item) => item.question.id
+      )
+    ).toEqual([missedQuestion.id])
+  })
+
+  test("mistake drill completes a question after two correct answers", () => {
+    const [question] = EXAM_QUESTIONS
+    const session = createDrillSession(
+      [question.id],
+      "2026-06-18T10:00:00.000Z"
+    )
+
+    expect(getDrillRemainingQuestionIds(session)).toEqual([question.id])
+
+    const firstCorrect = updateDrillSession(session, question.id, true)
+    expect(firstCorrect.correctStreaks[question.id]).toBe(1)
+    expect(getDrillRemainingQuestionIds(firstCorrect)).toEqual([question.id])
+
+    const missed = updateDrillSession(firstCorrect, question.id, false)
+    expect(missed.correctStreaks[question.id]).toBe(0)
+
+    const secondCorrect = updateDrillSession(missed, question.id, true)
+    const completed = updateDrillSession(secondCorrect, question.id, true)
+
+    expect(completed.completedIds).toEqual([question.id])
+    expect(completed.status).toBe("completed")
+    expect(getDrillRemainingQuestionIds(completed)).toEqual([])
+  })
+
   test("stats separate attempted correctness from overall coverage", () => {
     const [correctQuestion, missedQuestion] = EXAM_QUESTIONS
     const progress = createDefaultProgress()
@@ -115,5 +175,16 @@ describe("practice question flow", () => {
       coverage: 4,
       accuracy: 50,
     })
+  })
+
+  test("questions include exam-specific quality metadata", () => {
+    expect(
+      EXAM_QUESTIONS.every(
+        (question) =>
+          typeof question.examStyleConfidence === "number" &&
+          typeof question.commonTrap === "string" &&
+          typeof question.coreClosedBookLikely === "boolean"
+      )
+    ).toBe(true)
   })
 })

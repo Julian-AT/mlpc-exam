@@ -24,9 +24,15 @@ import { Switch } from "@/components/ui/switch"
 import { usePracticeProgress } from "@/hooks/use-practice-progress"
 import { questionBank } from "@/lib/data"
 import {
+  createDrillSession,
   evaluateChoiceAnswer,
   getBestCurrentQuestionId,
+  getDrillRemainingQuestionIds,
   getDisplayChoices,
+  getMockExamStats,
+  getMockRemainingSeconds,
+  getMockReviewItems,
+  getNextDrillQuestionId,
   getNextQuestionId,
   getOriginLabel,
   getPracticeQuestions,
@@ -34,25 +40,32 @@ import {
   getPrimarySource,
   getQuestionNumber,
   getQuestionTopics,
+  updateDrillSession,
+  createMockExamSession,
 } from "@/lib/practice"
 import { cn } from "@/lib/utils"
 
 import type { Choice, Question, Source, Topic } from "@/lib/data"
 import type {
+  MockReviewItem,
   PracticeMode,
   PracticeProgress,
+  PracticeStats,
   PracticeSourceFilter,
 } from "@/lib/practice"
 import type { IconSvgElement } from "@hugeicons/react"
 
 const EMPTY_SELECTION: string[] = []
+const MOCK_EXAM_MINUTES = 45
 
+type HeaderStats = Pick<PracticeStats, "answered" | "total">
 type ProgressSetter = React.Dispatch<React.SetStateAction<PracticeProgress>>
-type PracticeScreen = "menu" | "quiz"
+type PracticeScreen = "menu" | "quiz" | "results"
 
 export function PracticeApp() {
   const { progress, resetProgress, setProgress } = usePracticeProgress()
   const [screen, setScreen] = React.useState<PracticeScreen>("menu")
+  const [now, setNow] = React.useState(() => Date.now())
   const [draftSelection, setDraftSelection] = React.useState<{
     choiceIds: string[]
     questionId: string
@@ -74,6 +87,15 @@ export function PracticeApp() {
     () => getPracticeStats(questions, progress),
     [questions, progress]
   )
+  const mockStats = React.useMemo(
+    () => getMockExamStats(questions, progress.mockExam),
+    [progress.mockExam, questions]
+  )
+  const drillRemainingIds = React.useMemo(
+    () => getDrillRemainingQuestionIds(progress.drill),
+    [progress.drill]
+  )
+  const remainingMockSeconds = getMockRemainingSeconds(progress.mockExam, now)
   const currentQuestionId = getBestCurrentQuestionId(
     questions,
     progress.currentByMode[progress.mode]
@@ -81,29 +103,46 @@ export function PracticeApp() {
   const question =
     questions.find((item) => item.id === currentQuestionId) ?? null
   const displayChoices = React.useMemo(
-    () => (question ? getDisplayChoices(question, progress.shuffleChoices) : []),
+    () =>
+      question ? getDisplayChoices(question, progress.shuffleChoices) : [],
     [progress.shuffleChoices, question]
   )
   const questionIndex = question
     ? questions.findIndex((item) => item.id === question.id)
     : -1
   const savedAnswer = question ? progress.answers[question.id] : undefined
+  const isMockMode = progress.mode === "mock"
+  const isDrillMode = progress.mode === "drill"
+  const savedMockSelection =
+    question && progress.mockExam ? progress.mockExam.answers[question.id] : []
   const selectedChoiceIds =
     question && draftSelection?.questionId === question.id
       ? draftSelection.choiceIds
-      : (savedAnswer?.selectedChoiceIds ?? EMPTY_SELECTION)
+      : isMockMode
+        ? (savedMockSelection ?? EMPTY_SELECTION)
+        : (savedAnswer?.selectedChoiceIds ?? EMPTY_SELECTION)
   const showFeedback =
+    !isMockMode &&
     Boolean(savedAnswer) &&
     sameChoiceSet(selectedChoiceIds, savedAnswer?.selectedChoiceIds ?? [])
   const source = question ? getPrimarySource(question) : undefined
   const topics = question ? getQuestionTopics(question) : []
-  const topicTitle =
-    progress.topicId === "all"
-      ? "All topics"
-      : (topics[0]?.title ??
-        questionBank.topics.find((topic) => topic.id === progress.topicId)
-          ?.title ??
-        "All topics")
+  const topicTitle = getSessionTitle(progress, topics)
+  const isLastQuestion =
+    questionIndex >= 0 && questionIndex === questions.length - 1
+  const isDrillComplete =
+    isDrillMode &&
+    (progress.drill?.status === "completed" || drillRemainingIds.length === 0)
+  const headerStats: HeaderStats = isMockMode
+    ? { answered: mockStats.answered, total: mockStats.total }
+    : stats
+  const headerTitle =
+    isMockMode && progress.mockExam?.status === "active"
+      ? formatDuration(remainingMockSeconds)
+      : topicTitle
+  const coverage = isMockMode
+    ? getPercent(mockStats.answered, mockStats.total)
+    : stats.coverage
 
   const commitProgress = React.useCallback(
     (updater: (current: PracticeProgress) => PracticeProgress) => {
@@ -151,6 +190,90 @@ export function PracticeApp() {
     [commitProgress]
   )
 
+  const startMockExam = React.useCallback(
+    (restart = false) => {
+      setDraftSelection(null)
+      setNow(Date.now())
+      commitProgress((current) => {
+        const examQuestions = getPracticeQuestions(
+          { mode: "exam", sourceFilter: "all", topicId: "all" },
+          current
+        )
+        const shouldResume =
+          !restart &&
+          current.mockExam?.status === "active" &&
+          current.mockExam.questionIds.length > 0
+        const mockExam =
+          shouldResume && current.mockExam
+            ? current.mockExam
+            : createMockExamSession(
+                examQuestions.map((item) => item.id),
+                new Date().toISOString(),
+                MOCK_EXAM_MINUTES
+              )
+
+        return {
+          ...current,
+          mode: "mock",
+          topicId: "all",
+          sourceFilter: "all",
+          mockExam,
+          currentByMode: {
+            ...current.currentByMode,
+            mock: shouldResume
+              ? (getBestCurrentQuestionId(
+                  examQuestions,
+                  current.currentByMode.mock
+                ) ??
+                mockExam.questionIds[0] ??
+                null)
+              : (mockExam.questionIds[0] ?? null),
+          },
+        }
+      })
+      setScreen("quiz")
+    },
+    [commitProgress]
+  )
+
+  const startDrill = React.useCallback(
+    (questionIds?: string[]) => {
+      setDraftSelection(null)
+      const hasQuestions =
+        questionIds !== undefined
+          ? questionIds.length > 0
+          : getPracticeQuestions(
+              { mode: "review", sourceFilter: "all", topicId: "all" },
+              progress
+            ).length > 0
+
+      commitProgress((current) => {
+        const reviewQuestions = getPracticeQuestions(
+          { mode: "review", sourceFilter: "all", topicId: "all" },
+          current
+        )
+        const drill = createDrillSession(
+          questionIds ?? reviewQuestions.map((item) => item.id),
+          new Date().toISOString()
+        )
+
+        return {
+          ...current,
+          mode: "drill",
+          topicId: "all",
+          sourceFilter: "all",
+          drill,
+          currentByMode: {
+            ...current.currentByMode,
+            drill: drill.questionIds[0] ?? null,
+          },
+        }
+      })
+      setScreen(hasQuestions ? "quiz" : "results")
+    },
+    [commitProgress, progress]
+  )
+
   const jumpToQuestion = React.useCallback(
     (questionId: string | null) => {
       setDraftSelection(null)
@@ -167,6 +290,22 @@ export function PracticeApp() {
 
   const move = React.useCallback(
     (direction: 1 | -1) => {
+      if (progress.mode === "drill") {
+        const nextDrillQuestionId = getNextDrillQuestionId(
+          questions,
+          progress.drill,
+          question?.id ?? progress.currentByMode.drill
+        )
+
+        if (!nextDrillQuestionId) {
+          setScreen("results")
+          return
+        }
+
+        jumpToQuestion(nextDrillQuestionId)
+        return
+      }
+
       jumpToQuestion(
         getNextQuestionId(
           questions,
@@ -178,11 +317,90 @@ export function PracticeApp() {
     [
       jumpToQuestion,
       progress.currentByMode,
+      progress.drill,
       progress.mode,
       question?.id,
       questions,
     ]
   )
+
+  const submitMockAnswer = React.useCallback(
+    (submit: boolean) => {
+      if (!question || !selectedChoiceIds.length) {
+        return
+      }
+
+      const nextQuestionId = getNextQuestionId(questions, question.id, 1)
+      const isLastQuestion =
+        questionIndex === questions.length - 1 || nextQuestionId === question.id
+
+      setDraftSelection(null)
+      commitProgress((current) => {
+        const mockExam =
+          current.mockExam ??
+          createMockExamSession(
+            questions.map((item) => item.id),
+            new Date().toISOString(),
+            MOCK_EXAM_MINUTES
+          )
+        const shouldSubmit = submit || isLastQuestion
+
+        return {
+          ...current,
+          mockExam: {
+            ...mockExam,
+            status: shouldSubmit ? "submitted" : mockExam.status,
+            answers: {
+              ...mockExam.answers,
+              [question.id]: selectedChoiceIds,
+            },
+            submittedAt: shouldSubmit
+              ? new Date().toISOString()
+              : mockExam.submittedAt,
+          },
+          currentByMode: {
+            ...current.currentByMode,
+            mock: shouldSubmit ? question.id : nextQuestionId,
+          },
+        }
+      })
+
+      if (submit || isLastQuestion) {
+        setScreen("results")
+      }
+    },
+    [commitProgress, question, questionIndex, questions, selectedChoiceIds]
+  )
+
+  const submitMockExam = React.useCallback(() => {
+    setDraftSelection(null)
+    commitProgress((current) => {
+      if (!current.mockExam) {
+        return current
+      }
+
+      return {
+        ...current,
+        mockExam: {
+          ...current.mockExam,
+          status: "submitted",
+          answers:
+            question && selectedChoiceIds.length > 0
+              ? {
+                  ...current.mockExam.answers,
+                  [question.id]: selectedChoiceIds,
+                }
+              : current.mockExam.answers,
+          submittedAt: current.mockExam.submittedAt ?? new Date().toISOString(),
+        },
+        currentByMode: {
+          ...current.currentByMode,
+          mock: question?.id ?? current.currentByMode.mock,
+        },
+      }
+    })
+    setScreen("results")
+  }, [commitProgress, question, selectedChoiceIds])
 
   const choose = React.useCallback(
     (choiceId: string) => {
@@ -210,9 +428,14 @@ export function PracticeApp() {
 
     commitProgress((current) => {
       const previousAnswer = current.answers[question.id]
+      const drill =
+        current.mode === "drill" && current.drill
+          ? updateDrillSession(current.drill, question.id, isCorrect)
+          : current.drill
 
       return {
         ...current,
+        drill,
         answers: {
           ...current.answers,
           [question.id]: {
@@ -248,11 +471,132 @@ export function PracticeApp() {
     })
   }, [commitProgress, question])
 
-  const bottomActionLabel = !selectedChoiceIds.length
-    ? "Choose an answer"
-    : showFeedback
-      ? "Next question"
-      : "Check answer"
+  const bottomActionLabel = getBottomActionLabel({
+    isDrillComplete,
+    isLastQuestion,
+    isMockMode,
+    selectedCount: selectedChoiceIds.length,
+    showFeedback,
+  })
+  const bottomDisabled = !question || selectedChoiceIds.length === 0
+
+  const performBottomAction = React.useCallback(() => {
+    if (!question || bottomDisabled) {
+      return
+    }
+
+    if (isMockMode) {
+      submitMockAnswer(isLastQuestion)
+      return
+    }
+
+    if (showFeedback) {
+      if (isDrillComplete) {
+        setScreen("results")
+        return
+      }
+
+      move(1)
+      return
+    }
+
+    checkAnswer()
+  }, [
+    bottomDisabled,
+    checkAnswer,
+    isDrillComplete,
+    isLastQuestion,
+    isMockMode,
+    move,
+    question,
+    showFeedback,
+    submitMockAnswer,
+  ])
+
+  React.useEffect(() => {
+    if (
+      progress.mode !== "mock" ||
+      progress.mockExam?.status !== "active" ||
+      !progress.mockExam
+    ) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      const currentTime = Date.now()
+
+      setNow(currentTime)
+
+      if (getMockRemainingSeconds(progress.mockExam, currentTime) === 0) {
+        submitMockExam()
+      }
+    }, 1000)
+
+    return () => window.clearInterval(intervalId)
+  }, [
+    progress.mockExam,
+    progress.mockExam?.status,
+    progress.mode,
+    submitMockExam,
+  ])
+
+  React.useEffect(() => {
+    if (screen !== "quiz" || !question) {
+      return
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isTypingTarget(event.target)) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      const numericIndex = /^[1-9]$/.test(key) ? Number(key) - 1 : -1
+      const letterIndex = /^[a-i]$/.test(key) ? key.charCodeAt(0) - 97 : -1
+      const choiceIndex = numericIndex >= 0 ? numericIndex : letterIndex
+
+      if (choiceIndex >= 0 && displayChoices[choiceIndex]) {
+        event.preventDefault()
+        choose(displayChoices[choiceIndex].id)
+        return
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault()
+        performBottomAction()
+        return
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault()
+        move(-1)
+        return
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault()
+        if (isMockMode || showFeedback) {
+          performBottomAction()
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [
+    choose,
+    displayChoices,
+    isMockMode,
+    move,
+    performBottomAction,
+    question,
+    screen,
+    showFeedback,
+  ])
+
+  React.useEffect(() => {
+    window.scrollTo({ left: 0, top: 0 })
+  }, [currentQuestionId, screen])
 
   if (screen === "menu") {
     return (
@@ -260,6 +604,25 @@ export function PracticeApp() {
         progress={progress}
         resetProgress={resetProgress}
         setProgress={setProgress}
+        onStartDrill={startDrill}
+        onStartMockExam={startMockExam}
+        onStartQuestionSet={startQuestionSet}
+      />
+    )
+  }
+
+  if (
+    screen === "results" ||
+    (progress.mode === "mock" && progress.mockExam?.status === "submitted")
+  ) {
+    return (
+      <ResultScreen
+        mode={progress.mode}
+        progress={progress}
+        questions={questions}
+        onMenu={() => setScreen("menu")}
+        onRetakeMock={() => startMockExam(true)}
+        onStartDrill={startDrill}
         onStartQuestionSet={startQuestionSet}
       />
     )
@@ -268,8 +631,8 @@ export function PracticeApp() {
   return (
     <main className="min-h-svh bg-background text-foreground">
       <ExamHeader
-        stats={stats}
-        title={topicTitle}
+        stats={headerStats}
+        title={headerTitle}
         onOpenMenu={() => setScreen("menu")}
       />
 
@@ -277,7 +640,7 @@ export function PracticeApp() {
         <div className="mb-5 h-[3px] rounded-full bg-muted">
           <div
             className="h-full rounded-full bg-foreground transition-all"
-            style={{ width: `${stats.coverage}%` }}
+            style={{ width: `${coverage}%` }}
           />
         </div>
 
@@ -329,21 +692,17 @@ export function PracticeApp() {
       </section>
 
       <BottomBar
-        disabled={!question || !selectedChoiceIds.length}
+        disabled={bottomDisabled}
         label={bottomActionLabel}
-        onClick={() => {
-          if (showFeedback) {
-            move(1)
-          } else {
-            checkAnswer()
-          }
-        }}
+        onClick={performBottomAction}
       />
     </main>
   )
 }
 
 function TrainerMenu({
+  onStartDrill,
+  onStartMockExam,
   onStartQuestionSet,
   progress,
   resetProgress,
@@ -354,6 +713,8 @@ function TrainerMenu({
     topicId?: "all" | string,
     sourceFilter?: PracticeSourceFilter
   ) => void
+  onStartDrill: (questionIds?: string[]) => void
+  onStartMockExam: (restart?: boolean) => void
   progress: PracticeProgress
   resetProgress: () => void
   setProgress: ProgressSetter
@@ -386,6 +747,7 @@ function TrainerMenu({
     () => getPracticeStats(examQuestions, progress),
     [examQuestions, progress]
   )
+  const activeMockExam = progress.mockExam?.status === "active"
   const topicRows = React.useMemo(
     () =>
       questionBank.topics
@@ -477,12 +839,19 @@ function TrainerMenu({
           <MenuLabel>Focused practice</MenuLabel>
           <div className="grid gap-2.5">
             <MenuActionRow
-              description="Missed answers and bookmarked questions"
+              description="Timed run with feedback only after the result"
+              label={`${MOCK_EXAM_MINUTES} min`}
+              title={activeMockExam ? "Resume mock exam" : "Mock exam"}
+              value={examQuestions.length}
+              onClick={() => onStartMockExam(false)}
+            />
+            <MenuActionRow
+              description="Repeat misses and bookmarks until they stick"
               disabled={reviewQuestions.length === 0}
-              label="Review"
-              title="Review mistakes"
+              label="Drill"
+              title="Mistake drill"
               value={reviewQuestions.length}
-              onClick={() => onStartQuestionSet("review", "all", "all")}
+              onClick={() => onStartDrill()}
             />
             <MenuActionRow
               description="Exam images plus approved support questions"
@@ -530,13 +899,216 @@ function TrainerMenu({
   )
 }
 
+function ResultScreen({
+  mode,
+  onMenu,
+  onRetakeMock,
+  onStartDrill,
+  onStartQuestionSet,
+  progress,
+  questions,
+}: {
+  mode: PracticeMode
+  onMenu: () => void
+  onRetakeMock: () => void
+  onStartDrill: (questionIds?: string[]) => void
+  onStartQuestionSet: (
+    mode: PracticeMode,
+    topicId?: "all" | string,
+    sourceFilter?: PracticeSourceFilter
+  ) => void
+  progress: PracticeProgress
+  questions: Question[]
+}) {
+  const isMock = mode === "mock"
+  const mockStats = React.useMemo(
+    () => getMockExamStats(questions, progress.mockExam),
+    [progress.mockExam, questions]
+  )
+  const reviewItems = React.useMemo(
+    () => getMockReviewItems(questions, progress.mockExam),
+    [progress.mockExam, questions]
+  )
+  const drillRemainingIds = getDrillRemainingQuestionIds(progress.drill)
+  const drillTotal = progress.drill?.questionIds.length ?? questions.length
+  const drillCompleted = progress.drill?.completedIds.length ?? 0
+  const headerStats: HeaderStats = isMock
+    ? { answered: mockStats.correct, total: mockStats.total }
+    : { answered: drillCompleted, total: drillTotal }
+  const missedIds = reviewItems.map((item) => item.question.id)
+
+  return (
+    <main className="min-h-svh bg-background text-foreground">
+      <ExamHeader stats={headerStats} title="Result" onOpenMenu={onMenu} />
+
+      <section className="mx-auto w-full max-w-[590px] px-4 pt-8 pb-12 sm:px-0">
+        <MenuLabel>
+          {isMock ? "Closed-book mock exam" : "Focused practice"}
+        </MenuLabel>
+        <h1 className="mt-3 text-[30px] leading-[1.08] font-bold tracking-normal">
+          {isMock ? "Mock exam result" : "Mistake drill complete"}
+        </h1>
+        <p className="mt-2 max-w-[420px] text-base leading-[1.45] text-muted-foreground">
+          {isMock
+            ? "Review the misses, then drill them until they are automatic."
+            : "The active mistake set is cleared for now."}
+        </p>
+
+        <div className="mt-6 grid grid-cols-3 gap-2">
+          {isMock ? (
+            <>
+              <ResultStat label="Score" value={`${mockStats.correct}`} />
+              <ResultStat label="Missed" value={`${reviewItems.length}`} />
+              <ResultStat label="Accuracy" value={`${mockStats.accuracy}%`} />
+            </>
+          ) : (
+            <>
+              <ResultStat label="Done" value={`${drillCompleted}`} />
+              <ResultStat label="Left" value={`${drillRemainingIds.length}`} />
+              <ResultStat label="Total" value={`${drillTotal}`} />
+            </>
+          )}
+        </div>
+
+        <div className="mt-5 grid gap-2 sm:grid-cols-3">
+          {isMock && reviewItems.length > 0 && (
+            <button
+              className="h-[46px] rounded-[10px] bg-foreground px-4 text-sm font-bold text-background shadow-sm transition hover:bg-foreground/90"
+              onClick={() => onStartDrill(missedIds)}
+              type="button"
+            >
+              Drill missed
+            </button>
+          )}
+          {isMock && (
+            <button
+              className="h-[46px] rounded-[10px] border border-border bg-card px-4 text-sm font-bold shadow-sm transition hover:bg-muted/50"
+              onClick={onRetakeMock}
+              type="button"
+            >
+              Retake mock
+            </button>
+          )}
+          {!isMock && (
+            <button
+              className="h-[46px] rounded-[10px] bg-foreground px-4 text-sm font-bold text-background shadow-sm transition hover:bg-foreground/90"
+              onClick={() => onStartQuestionSet("exam", "all", "all")}
+              type="button"
+            >
+              Practice all
+            </button>
+          )}
+          <button
+            className="h-[46px] rounded-[10px] border border-border bg-card px-4 text-sm font-bold shadow-sm transition hover:bg-muted/50"
+            onClick={onMenu}
+            type="button"
+          >
+            Menu
+          </button>
+        </div>
+
+        {isMock && (
+          <section className="mt-9 space-y-2.5">
+            <MenuLabel>
+              {reviewItems.length ? "Review missed" : "Review"}
+            </MenuLabel>
+            {reviewItems.length ? (
+              <div className="grid gap-3">
+                {reviewItems.map((item) => (
+                  <ResultReviewCard item={item} key={item.question.id} />
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-[10px] border border-border bg-card px-4 py-4 text-sm font-semibold shadow-sm">
+                Nothing missed.
+              </div>
+            )}
+          </section>
+        )}
+      </section>
+    </main>
+  )
+}
+
+function ResultStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[10px] border border-border bg-card px-3 py-3 shadow-sm">
+      <div className="font-mono text-xl leading-none font-bold">{value}</div>
+      <div className="mt-1 text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
+        {label}
+      </div>
+    </div>
+  )
+}
+
+function ResultReviewCard({ item }: { item: MockReviewItem }) {
+  const source = getPrimarySource(item.question)
+
+  return (
+    <article className="rounded-[10px] border border-border bg-card px-4 py-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-[11px] font-bold tracking-[0.08em] text-muted-foreground uppercase">
+          {getQuestionTopics(item.question)
+            .map((topic) => compactMetaTitle(topic.title))
+            .join(" / ")}
+        </div>
+        {source?.assetPath && <SourceDialog source={source} />}
+      </div>
+      <MathText
+        className="mt-2 text-[15px] leading-[1.5] font-semibold"
+        text={item.question.stem}
+      />
+      <div className="mt-3 grid gap-2">
+        <AnswerSummary
+          label="Your answer"
+          muted={item.selectedChoiceIds.length === 0}
+          text={getSelectedAnswerText(item.question, item.selectedChoiceIds)}
+        />
+        <AnswerSummary
+          label="Correct"
+          text={getCorrectAnswerText(item.question)}
+        />
+      </div>
+      <MathText
+        className="mt-3 text-sm leading-relaxed text-muted-foreground"
+        text={item.question.explanation}
+      />
+    </article>
+  )
+}
+
+function AnswerSummary({
+  label,
+  muted,
+  text,
+}: {
+  label: string
+  muted?: boolean
+  text: string
+}) {
+  return (
+    <div className="rounded-lg bg-muted px-3 py-2">
+      <div className="text-[10px] font-bold tracking-[0.12em] text-muted-foreground uppercase">
+        {label}
+      </div>
+      <MathText
+        className={cn(
+          "mt-1 text-sm leading-relaxed font-semibold",
+          muted && "text-muted-foreground"
+        )}
+        text={text}
+      />
+    </div>
+  )
+}
+
 function ExamHeader({
   onOpenMenu,
   stats,
   title,
 }: {
   onOpenMenu: () => void
-  stats: ReturnType<typeof getPracticeStats>
+  stats: HeaderStats
   title: string
 }) {
   return (
@@ -922,6 +1494,102 @@ function getStartQuestionId(
     questions.find((question) => !progress.answers[question.id])?.id ??
     questions[0]?.id ??
     null
+  )
+}
+
+function getSessionTitle(progress: PracticeProgress, topics: Topic[]) {
+  if (progress.mode === "mock") {
+    return "Mock exam"
+  }
+
+  if (progress.mode === "drill") {
+    return "Mistake drill"
+  }
+
+  if (progress.topicId === "all") {
+    return "All topics"
+  }
+
+  return (
+    topics[0]?.title ??
+    questionBank.topics.find((topic) => topic.id === progress.topicId)?.title ??
+    "All topics"
+  )
+}
+
+function getBottomActionLabel({
+  isDrillComplete,
+  isLastQuestion,
+  isMockMode,
+  selectedCount,
+  showFeedback,
+}: {
+  isDrillComplete: boolean
+  isLastQuestion: boolean
+  isMockMode: boolean
+  selectedCount: number
+  showFeedback: boolean
+}) {
+  if (selectedCount === 0) {
+    return "Choose an answer"
+  }
+
+  if (isMockMode) {
+    return isLastQuestion ? "Finish mock exam" : "Next question"
+  }
+
+  if (showFeedback) {
+    return isDrillComplete ? "Finish drill" : "Next question"
+  }
+
+  return "Check answer"
+}
+
+function formatDuration(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`
+}
+
+function getSelectedAnswerText(
+  question: Question,
+  selectedChoiceIds: string[]
+) {
+  if (!selectedChoiceIds.length) {
+    return "Unanswered"
+  }
+
+  return getChoiceText(question, selectedChoiceIds)
+}
+
+function getCorrectAnswerText(question: Question) {
+  return getChoiceText(question, question.correctChoiceIds ?? [])
+}
+
+function getChoiceText(question: Question, choiceIds: string[]) {
+  const choiceIdSet = new Set(choiceIds)
+  const choices = (question.choices ?? [])
+    .filter((choice) => choiceIdSet.has(choice.id))
+    .map((choice) => choice.text)
+
+  return choices.length ? choices.join("; ") : "No answer"
+}
+
+function getPercent(value: number, total: number) {
+  return total ? Math.round((value / total) * 100) : 0
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
   )
 }
 
